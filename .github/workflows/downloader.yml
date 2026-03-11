@@ -1,0 +1,61 @@
+name: Secure Asynchronous Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'Target Resource HTTPS URL'
+        required: true
+        type: string
+      output_name:
+        description: 'Desired Filename (without extension)'
+        required: false
+        default: 'secure_payload'
+        type: string
+
+jobs:
+  download_and_encrypt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 针对大文件设置 6 小时超时限制
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Remote Resource
+        # 使用 curl 开启重试、静默模式（减少日志暴露）和断点续传
+        run: |
+          curl -L --retry 5 --retry-delay 10 \
+               -s -o "raw_binary.tmp" \
+               "${{ github.event.inputs.target_url }}"
+
+      - name: Perform Symmetric Encryption (AES-256)
+        env:
+          GPG_PASSPHRASE: ${{ secrets.FILE_ENCRYPT_KEY }}
+        run: |
+          # 验证 Secret 是否存在
+          if [ -z "$GPG_PASSPHRASE" ]; then
+            echo "Error: FILE_ENCRYPT_KEY is not set in Secrets."
+            exit 1
+          fi
+          
+          # 使用 GPG 2.x 进行流式加密
+          # --passphrase-fd 0 从标准输入读取以防在 ps 中泄露
+          echo "$GPG_PASSPHRASE" | gpg --batch --yes --passphrase-fd 0 \
+            --symmetric \
+            --cipher-algo AES256 \
+            --output "${{ github.event.inputs.output_name }}.gpg" \
+            raw_binary.tmp
+          
+          # 生成摘要用于下载后的完整性校验
+          sha256sum "${{ github.event.inputs.output_name }}.gpg" > checksum.txt
+
+      - name: Upload Encrypted Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.output_name }}-bundle
+          path: |
+            *.gpg
+            checksum.txt
+          retention-days: 3  # 仅保留3天以节省私有仓库配额
+          compression-level: 0 # 因为 GPG 已加密，进一步压缩通常无效且耗时
